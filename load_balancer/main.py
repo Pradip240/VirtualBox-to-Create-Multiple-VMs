@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 import httpx
 
 app = FastAPI()
@@ -20,25 +21,29 @@ HOP_BY_HOP_HEADERS = {
     "upgrade",
 }
 
+client = httpx.AsyncClient(timeout=None)
+
 
 @app.api_route("/{path:path}", methods=["GET","POST","PUT","DELETE","PATCH","OPTIONS"])
 async def proxy(path: str, request: Request):
+    full_path = request.url.path 
     for prefix, target in ROUTES.items():
-        if path.startswith(prefix):
-            url = f"{target}/{path}"
+        if full_path.startswith(prefix):
+            url = f"{target}{full_path}"
 
             headers = {
                 k: v for k, v in request.headers.items()
                 if k.lower() not in HOP_BY_HOP_HEADERS
             }
 
-            client = httpx.AsyncClient(timeout=None)
+            # Stream request body instead of buffering it all
+            body = request.stream()
 
             upstream = await client.stream(
                 request.method,
                 url,
                 params=request.query_params,
-                content=await request.body(),
+                content=body,
                 headers=headers,
             )
 
@@ -48,11 +53,11 @@ async def proxy(path: str, request: Request):
             }
 
             return StreamingResponse(
-                upstream.aiter_bytes(),   # <-- direct stream pipe
+                upstream.aiter_bytes(),
                 status_code=upstream.status_code,
                 headers=response_headers,
                 media_type=upstream.headers.get("content-type"),
-                background=None,  # client stays open until stream ends
+                background=BackgroundTask(upstream.aclose),
             )
 
     return {"error": "No route matched"}
